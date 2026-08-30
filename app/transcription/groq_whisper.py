@@ -28,6 +28,21 @@ class GroqWhisperTranscriber:
         self.language = language
         self.timeout = timeout
         self._is_ready = False
+        self._client: httpx.Client | None = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
+
+    def close(self) -> None:
+        """Fecha a sessão HTTP persistente."""
+        if self._client and not self._client.is_closed:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
 
     def load_model(self) -> None:
         """Valida a configuração da API da Groq."""
@@ -66,10 +81,8 @@ class GroqWhisperTranscriber:
         """Remove repetições anômalas e artefatos de alucinação gerados pelo Whisper."""
         if not text:
             return ""
-        # Remove repetições consecutivas de frases idênticas
         words = text.split()
         if len(words) > 6:
-            # Detecta se uma sequência de 3 ou 4 palavras está se repetindo indefinidamente
             for seq_len in (4, 3, 2):
                 cleaned_words: list[str] = []
                 i = 0
@@ -77,7 +90,6 @@ class GroqWhisperTranscriber:
                     chunk = words[i : i + seq_len]
                     cleaned_words.extend(chunk)
                     i += seq_len
-                    # Pula repetições imediatas do mesmo chunk
                     while i + seq_len <= len(words) and words[i : i + seq_len] == chunk:
                         i += seq_len
                 words = cleaned_words
@@ -85,7 +97,7 @@ class GroqWhisperTranscriber:
         return text.strip()
 
     def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> TranscriptionResult:
-        """Envia o chunk de áudio para a API da Groq e retorna o resultado transcrito."""
+        """Envia o chunk de áudio para a API da Groq reutilizando conexão HTTP persistente."""
         if not self._is_ready:
             self.load_model()
             if not self._is_ready:
@@ -116,12 +128,12 @@ class GroqWhisperTranscriber:
 
         t0 = time.time()
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, headers=headers, data=data, files=files)
-                response.raise_for_status()
-                res_data = response.json()
-                raw_text = res_data.get("text", "").strip()
-                text = self._clean_hallucinations(raw_text)
+            client = self._get_client()
+            response = client.post(url, headers=headers, data=data, files=files)
+            response.raise_for_status()
+            res_data = response.json()
+            raw_text = res_data.get("text", "").strip()
+            text = self._clean_hallucinations(raw_text)
 
             inference_time = (time.time() - t0) * 1000.0
             return TranscriptionResult(
@@ -137,6 +149,11 @@ class GroqWhisperTranscriber:
                 f"Erro na API Groq ({e.response.status_code}): {e.response.text}",
                 level=30,
             )
+            return TranscriptionResult(text="", duration=duration, inference_time=round(elapsed, 1))
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException, ConnectionRefusedError, OSError) as e:
+            self.close()
+            elapsed = (time.time() - t0) * 1000.0
+            log_event("ASR", f"Falha de conexão Groq (sessão reiniciada): {e}", level=30)
             return TranscriptionResult(text="", duration=duration, inference_time=round(elapsed, 1))
         except Exception as e:
             elapsed = (time.time() - t0) * 1000.0

@@ -39,6 +39,7 @@ scratch/
 
 # Ferramentas Internas e Metadados de Desenvolvimento
 .agents/
+.tests/
 .onp-spec/
 .spec/
 onpspec.config.json

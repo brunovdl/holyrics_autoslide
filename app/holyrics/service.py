@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import httpx
 from typing import Callable
 
 from app.holyrics.client import HolyricsClient

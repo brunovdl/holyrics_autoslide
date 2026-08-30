@@ -19,6 +19,11 @@ class AudioRingBuffer:
         self._lock = threading.Lock()
         self.dropped_frames = 0
 
+    @property
+    def total_written(self) -> int:
+        with self._lock:
+            return self._total_written
+
     def write(self, chunk: np.ndarray) -> None:
         """Insere novas amostras no buffer circular."""
         with self._lock:

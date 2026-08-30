@@ -17,11 +17,15 @@ from app.transcription.base import TranscriptionEngine
 from app.transcription.groq_whisper import GroqWhisperTranscriber
 from app.transcription.faster_whisper import FasterWhisperTranscriber
 from app.transcription.buffer import AudioRingBuffer, RollingTranscriptBuffer
+from app.transcription.scheduler import ChunkScheduler
+from app.transcription.merger import TranscriptMerger
 from app.transcription.vad import EnergyVAD
 from app.matching.matcher import LyricsMatcher
 from app.decision.slide_decision import SlideDecisionEngine
+from app.decision.song_decision import SongTransitionDecisionEngine
 from app.holyrics.service import HolyricsService
 from app.models.app_state import AppState
+from app.models.song import Song
 from app.config.settings import AppSettings
 from app.utils.logging import log_event
 
@@ -57,6 +61,13 @@ class AutomationService:
             )
 
         self.audio_ring_buffer = AudioRingBuffer(max_seconds=30.0, sample_rate=16000)
+        self.chunk_scheduler = ChunkScheduler(
+            self.audio_ring_buffer,
+            window_duration=2.5,
+            hop_duration=0.8,
+            sample_rate=16000,
+        )
+        self.transcript_merger = TranscriptMerger(max_history_seconds=15.0)
         self.rolling_transcript = RollingTranscriptBuffer(max_duration_seconds=12.0)
         self.vad = EnergyVAD(enabled=settings.transcription.vad_enabled)
 
@@ -73,12 +84,32 @@ class AutomationService:
             cooldown_seconds=settings.decision.cooldown_seconds,
         )
 
+        self.song_decision_engine = SongTransitionDecisionEngine(
+            initial_threshold=settings.decision.song_threshold,
+            transition_threshold=max(settings.decision.song_threshold + 4.0, 92.0),
+            margin=settings.decision.song_margin,
+            confirmations=max(settings.decision.consecutive_confirmations + 1, 3),
+            transition_min_duration=3.0,
+        )
+
         self._audio_source: AudioSource | None = None
         self._worker_thread: threading.Thread | None = None
         self._is_worker_running = False
         self._manual_pause_until = 0.0
 
         self.holyrics_service.on_manual_slide_change = self._handle_manual_slide_change
+
+    def reset_context_for_song_change(self) -> None:
+        """Limpa completamente todo o histórico de transcrição e decisão ao trocar de música."""
+        self.transcript_merger.clear()
+        self.rolling_transcript.clear()
+        self.decision_engine.reset_candidate()
+        self.state.candidate_slide_index = None
+        self.state.candidate_slide_score = 0.0
+        self.state.candidate_slide_text = ""
+        self.state.candidate_hits = 0
+        self.state.last_transcript_chunk = ""
+        self.state.rolling_transcript = ""
 
     def _handle_manual_slide_change(self, new_slide_index: int) -> None:
         """Chamado quando o operador altera o slide manualmente no Holyrics."""
@@ -112,7 +143,7 @@ class AutomationService:
             now = time.time()
             self.state.audio_rms_db = rms_db
             self.state.audio_peak_db = peak_db
-            if now - last_vu_time >= 0.12:  # Throttling inteligente ~8 FPS
+            if now - last_vu_time >= 0.12:
                 last_vu_time = now
                 self.state.notify()
 
@@ -157,11 +188,15 @@ class AutomationService:
         self.state.notify()
 
     def _build_context_prompt(self) -> str | None:
-        """Gera um vocabulário dinâmico com base na música atual e playlist para guiar o Whisper."""
+        """Gera um prompt dinâmico focado nas estrofes ao redor do slide atual."""
         items: list[str] = []
         if self.state.current_song:
             items.append(self.state.current_song.title)
-            for slide in self.state.current_song.slides[:4]:
+            slides = self.state.current_song.slides
+            curr_idx = self.state.current_slide_index or 0
+            start_idx = max(0, curr_idx - 1)
+            end_idx = min(len(slides), curr_idx + 3)
+            for slide in slides[start_idx:end_idx]:
                 if slide.start_words:
                     items.append(slide.start_words)
         elif self.state.playlist.songs:
@@ -169,11 +204,11 @@ class AutomationService:
                 items.append(s.title)
 
         if items:
-            return ", ".join(items)[:200]
+            return ", ".join(items)[:220]
         return None
 
     def start_worker(self) -> None:
-        """Inicia o worker de transcrição e decisão em thread assíncrona."""
+        """Inicia o worker de transcrição e decisão orientado a amostras novas."""
         if self._is_worker_running:
             return
         self._is_worker_running = True
@@ -189,12 +224,7 @@ class AutomationService:
                     self._is_worker_running = False
                     return
 
-            chunk_duration = self.settings.audio.chunk_duration
-            step_interval = 0.18
-
             while self._is_worker_running:
-                loop_start = time.time()
-
                 if self.state.manual_override_active:
                     remaining = self._manual_pause_until - time.time()
                     if remaining > 0:
@@ -207,77 +237,85 @@ class AutomationService:
                         log_event("DECISION", "Pausa por intervenção manual concluída. Automação retomada.")
 
                 if self.state.automation_mode in ("MONITOR", "AUTOMATICO"):
-                    audio_chunk = self.audio_ring_buffer.get_recent(chunk_duration)
-                    if len(audio_chunk) > 0 and self.vad.has_speech(audio_chunk):
-                        try:
-                            # Isola a voz cantante e atenua bumbo/baixo/pratos
-                            filtered_chunk = apply_voice_bandpass_filter(audio_chunk)
-                            context_prompt = self._build_context_prompt()
-                            asr_res = self.transcription_engine.transcribe(filtered_chunk, prompt=context_prompt)
-                            if asr_res.text:
-                                self.rolling_transcript.add(asr_res.text, asr_res.timestamp)
-                                full_transcript = self.rolling_transcript.get_text()
+                    # Scheduler baseado em amostras de áudio novas (Janela 2.5s / Hop 0.8s)
+                    if self.chunk_scheduler.has_new_chunk():
+                        audio_chunk = self.chunk_scheduler.get_chunk_for_inference()
+                        if audio_chunk is not None and len(audio_chunk) > 0 and self.vad.has_speech(audio_chunk):
+                            try:
+                                context_prompt = self._build_context_prompt()
+                                asr_res = self.transcription_engine.transcribe(audio_chunk, prompt=context_prompt)
+                                if asr_res.text:
+                                    # Deduplica e funde transcrições
+                                    self.transcript_merger.add_transcription(asr_res.text, asr_res.timestamp)
+                                    self.rolling_transcript.add(asr_res.text, asr_res.timestamp)
 
-                                self.state.last_transcript_chunk = asr_res.text
-                                self.state.rolling_transcript = full_transcript
-                                self.state.inference_time_ms = asr_res.inference_time
-                                if asr_res.duration > 0:
-                                    self.state.rtf = round((asr_res.inference_time / 1000.0) / asr_res.duration, 2)
-                                self.state.notify()
+                                    slide_text = self.transcript_merger.get_slide_window_text(duration=4.0)
+                                    song_text = self.transcript_merger.get_song_window_text(duration=10.0)
 
-                                log_event("ASR", f"Transcrição: \"{asr_res.text}\" ({asr_res.inference_time:.0f}ms)")
-                                self._process_matching_and_decision(full_transcript, recent_transcript=asr_res.text)
-                        except Exception as e:
-                            log_event("ASR", f"Erro no processamento do chunk: {e}", level=30)
+                                    self.state.last_transcript_chunk = asr_res.text
+                                    self.state.rolling_transcript = song_text
+                                    self.state.inference_time_ms = asr_res.inference_time
+                                    if asr_res.duration > 0:
+                                        self.state.rtf = round((asr_res.inference_time / 1000.0) / asr_res.duration, 2)
+                                    self.state.notify()
 
-                elapsed = time.time() - loop_start
-                sleep_time = max(0.05, step_interval - elapsed)
-                time.sleep(sleep_time)
+                                    log_event("ASR", f"Transcrição: \"{asr_res.text}\" ({asr_res.inference_time:.0f}ms)")
+                                    self._process_matching_and_decision(
+                                        slide_transcript=slide_text,
+                                        song_transcript=song_text,
+                                        recent_transcript=asr_res.text,
+                                    )
+                            except Exception as e:
+                                log_event("ASR", f"Erro no processamento do chunk: {e}", level=30)
+
+                time.sleep(0.08)
 
         self._worker_thread = threading.Thread(target=_worker_loop, daemon=True)
         self._worker_thread.start()
 
-    def _process_matching_and_decision(self, transcript: str, recent_transcript: str = "") -> None:
-        """Compara o texto com a playlist, avalia candidatos e aciona o Holyrics se apropriado."""
-        if self.state.current_song is None and self.state.playlist.songs:
-            search_text = f"{transcript} {recent_transcript}".strip()
-            song_res = self.matcher.match_song(search_text, self.state.playlist)
-            if song_res.is_confident and song_res.song:
-                self.state.current_song = song_res.song
-                self.state.notify()
-                log_event("MATCHER", f"Música identificada: '{song_res.song.title}' (Score: {song_res.score:.1f}%)")
-                if self.state.automation_mode == "AUTOMATICO" and not self.state.manual_override_active:
-                    try:
-                        self.holyrics_service.client.show_lyrics_sync(song_res.song.id)
-                    except Exception as e:
-                        log_event("HOLYRICS", f"Erro ao enviar ShowLyrics: {e}", level=30)
+    def _process_matching_and_decision(
+        self,
+        slide_transcript: str,
+        song_transcript: str,
+        recent_transcript: str = "",
+    ) -> None:
+        """Compara o texto deduplicado com as músicas e slides aplicando máquina de estados."""
+        # Se nenhuma música está travada ou para avaliar transições de música
+        if self.state.playlist.songs:
+            song_res = self.matcher.match_song(song_transcript, self.state.playlist)
+            if song_res.song:
+                song_decision = self.song_decision_engine.evaluate(
+                    best_song=song_res.song,
+                    best_score=song_res.score,
+                    second_score=song_res.second_score,
+                )
+                if song_decision.should_change and song_decision.target_song:
+                    is_new_song = self.state.current_song is None or self.state.current_song.id != song_decision.target_song.id
+                    if is_new_song:
+                        log_event("MATCHER", f"Música travada pelo motor de decisão: '{song_decision.target_song.title}' ({song_decision.reason})")
+                        self.reset_context_for_song_change()
+                        self.state.current_song = song_decision.target_song
+                        self.state.current_slide_index = None
+                        self.state.current_slide_number = None
+                        self.state.notify()
 
+                        if self.state.automation_mode == "AUTOMATICO" and not self.state.manual_override_active:
+                            try:
+                                self.holyrics_service.client.show_lyrics_sync(song_decision.target_song.id, initial_index=0)
+                            except Exception as e:
+                                log_event("HOLYRICS", f"Erro ao enviar ShowLyrics: {e}", level=30)
+                        return
+
+        # Avaliação de slides dentro da música travada
         if self.state.current_song and self.state.current_song.slides:
             slide_res = self.matcher.match_slide(
-                transcript=transcript,
+                transcript=slide_transcript,
                 song=self.state.current_song,
                 current_slide_index=self.state.current_slide_index,
                 recent_transcript=recent_transcript,
             )
 
             best_cand = slide_res.best_candidate
-
-            # Se o score na música atual for baixo (< 60%), verifica se uma nova música da playlist começou
-            if (not best_cand or best_cand.score < 60.0) and len(self.state.playlist.songs) > 1:
-                alt_song_res = self.matcher.match_song(transcript, self.state.playlist)
-                if alt_song_res.is_confident and alt_song_res.song and alt_song_res.song.id != self.state.current_song.id:
-                    log_event("MATCHER", f"Troca de música detectada: '{alt_song_res.song.title}' (Score: {alt_song_res.score:.1f}%)")
-                    self.state.current_song = alt_song_res.song
-                    self.state.current_slide_index = None
-                    self.state.current_slide_number = None
-                    self.state.notify()
-                    if self.state.automation_mode == "AUTOMATICO" and not self.state.manual_override_active:
-                        try:
-                            self.holyrics_service.client.show_lyrics_sync(alt_song_res.song.id, initial_index=0)
-                        except Exception as e:
-                            log_event("HOLYRICS", f"Erro ao trocar música via ShowLyrics: {e}", level=30)
-                    return
-
             if best_cand:
                 self.state.candidate_slide_index = best_cand.slide_index
                 self.state.candidate_slide_text = best_cand.text

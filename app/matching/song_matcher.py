@@ -20,14 +20,24 @@ class SongMatchResult:
 
 
 class SongMatcher:
-    """Compara o texto acumulado com todas as músicas da playlist."""
+    """Compara o texto acumulado com todas as músicas da playlist usando pesos discriminativos."""
 
-    def __init__(self, threshold: float = 82.0, min_margin: float = 8.0) -> None:
+    def __init__(self, threshold: float = 88.0, min_margin: float = 10.0) -> None:
         self.threshold = threshold
         self.min_margin = min_margin
 
+    def _build_playlist_word_frequency(self, playlist: PlaylistSnapshot) -> dict[str, int]:
+        """Calcula em quantas músicas da playlist cada palavra ocorre (frequência de documento)."""
+        freq: dict[str, int] = {}
+        for s in playlist.songs:
+            norm = s.normalized_full_text or normalize_text(s.full_text)
+            words = set(w for w in norm.split() if len(w) > 2)
+            for w in words:
+                freq[w] = freq.get(w, 0) + 1
+        return freq
+
     def identify_song(self, transcript: str, playlist: PlaylistSnapshot) -> SongMatchResult:
-        """Avalia a playlist e retorna a música candidata mais provável."""
+        """Avalia a playlist e retorna a música candidata mais provável com base em termos discriminativos."""
         normalized_transcript = normalize_text(transcript)
         if not normalized_transcript or not playlist.songs:
             return SongMatchResult(
@@ -38,26 +48,38 @@ class SongMatcher:
                 is_confident=False,
             )
 
+        transcript_words = set(w for w in normalized_transcript.split() if len(w) > 2)
+        doc_freq = self._build_playlist_word_frequency(playlist)
+        num_songs = len(playlist.songs)
+
         scored_songs: list[tuple[Song, float]] = []
 
         for song in playlist.songs:
             if not song.normalized_full_text:
                 song.normalized_full_text = normalize_text(song.full_text)
 
-            best_slide_score = 0.0
-            for slide in song.slides:
-                if not slide.normalized_text:
-                    slide.normalized_text = normalize_text(slide.text)
-                if slide.normalized_text:
-                    s_score = fuzz.partial_ratio(normalized_transcript, slide.normalized_text)
-                    if s_score > best_slide_score:
-                        best_slide_score = s_score
-
             p_ratio = fuzz.partial_ratio(normalized_transcript, song.normalized_full_text)
             token_set = fuzz.token_set_ratio(normalized_transcript, song.normalized_full_text)
+            base_score = (p_ratio * 0.55) + (token_set * 0.45)
 
-            combined_score = max(best_slide_score, (p_ratio * 0.60) + (token_set * 0.40))
-            scored_songs.append((song, combined_score))
+            # Calcula bônus discriminativo para palavras raras e exclusivas desta música
+            song_words = set(w for w in song.normalized_full_text.split() if len(w) > 2)
+            matched_words = transcript_words.intersection(song_words)
+
+            discrim_score = 0.0
+            if matched_words:
+                weights = []
+                for w in matched_words:
+                    freq = doc_freq.get(w, num_songs)
+                    # Palavra exclusiva da música na playlist ganha peso máximo (1.0)
+                    # Palavra que se repete em todas as músicas ganha peso baixo (~0.2)
+                    weight = 1.0 / freq if freq > 0 else 0.2
+                    weights.append(weight)
+                discrim_score = min(100.0, (sum(weights) / max(1, len(matched_words))) * 100.0)
+
+            # Combina score textual com a presença de termos exclusivos
+            final_song_score = (base_score * 0.70) + (discrim_score * 0.30) if discrim_score > 0 else base_score
+            scored_songs.append((song, final_song_score))
 
         scored_songs.sort(key=lambda x: x[1], reverse=True)
 

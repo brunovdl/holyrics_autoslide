@@ -114,13 +114,28 @@ class SlideDecisionEngine:
             self._candidate_slide = candidate_index
             self._candidate_hits = 1
 
-        is_strong = candidate_score >= self.threshold_strong
-        is_possible = candidate_score >= self.threshold_possible
+        # Determina o nível de evidência necessário de acordo com a distância do salto
+        if current_slide_index is not None:
+            jump_diff = candidate_index - current_slide_index
+            if jump_diff == 1:
+                # Sequência natural (Slide N -> N+1)
+                req_score = self.threshold_strong
+                req_hits = self.required_confirmations
+            elif jump_diff == 2:
+                # Salto curto (Slide N -> N+2)
+                req_score = max(self.threshold_strong, 88.0)
+                req_hits = self.required_confirmations
+            else:
+                # Salto grande ou volta para trás (refrão repetido)
+                req_score = max(self.threshold_strong + 4.0, 92.0)
+                req_hits = max(self.required_confirmations + 1, 3)
+        else:
+            req_score = self.threshold_strong
+            req_hits = self.required_confirmations
 
         has_enough_hits = (
-            (is_strong and self._candidate_hits >= self.required_confirmations)
-            or (is_possible and self._candidate_hits >= max(2, self.required_confirmations + 1))
-            or candidate_score >= 96.0
+            (candidate_score >= req_score and self._candidate_hits >= req_hits)
+            or (candidate_score >= self.threshold_possible and self._candidate_hits >= (req_hits + 1))
         )
 
         if has_enough_hits:
@@ -133,7 +148,7 @@ class SlideDecisionEngine:
                 target_slide_index=candidate_index,
                 confidence=candidate_score,
                 consecutive_hits=self._candidate_hits,
-                required_hits=self.required_confirmations,
+                required_hits=req_hits,
                 reason="Confirmações e score atingidos com sucesso",
             )
 
@@ -142,6 +157,6 @@ class SlideDecisionEngine:
             target_slide_index=candidate_index,
             confidence=candidate_score,
             consecutive_hits=self._candidate_hits,
-            required_hits=self.required_confirmations,
-            reason=f"Aguardando confirmações consecutivas ({self._candidate_hits}/{self.required_confirmations})",
+            required_hits=req_hits,
+            reason=f"Aguardando confirmações consecutivas ({self._candidate_hits}/{req_hits})",
         )
