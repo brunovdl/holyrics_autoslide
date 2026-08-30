@@ -42,12 +42,12 @@ class ChunkScheduler:
         if diff < self.hop_samples:
             return None
 
-        # Backpressure: se o pipeline atrasou mais de 2 hops, descarta atraso e pula para o presente
-        if diff > (self.hop_samples * 2):
-            self.dropped_chunks += int(diff // self.hop_samples) - 1
-            self._last_processed_total = current_total - self.hop_samples
-        else:
-            self._last_processed_total += self.hop_samples
+        # Contabiliza hops descartados se houve atraso superior a 1 hop
+        dropped_hops = max(0, int(diff // self.hop_samples) - 1)
+        self.dropped_chunks += dropped_hops
+
+        # Política 'latest wins': entrega o áudio do presente e consome todo o backlog
+        self._last_processed_total = current_total
 
         return self.ring_buffer.get_recent(self.window_duration)
 

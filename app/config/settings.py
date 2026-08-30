@@ -53,6 +53,7 @@ class AudioSettings(BaseModel):
     wav_file_path: str | None = Field(default=None)
     sample_rate: int = Field(default=16000)
     channels: int = Field(default=1)
+    channel_selection: Literal["mono", "canal_1", "canal_2", "stereo_1_2"] = Field(default="mono")
     chunk_duration: float = Field(default=DEFAULT_CHUNK_DURATION)
     overlap_duration: float = Field(default=DEFAULT_OVERLAP_DURATION)
     rolling_window_duration: float = Field(default=DEFAULT_ROLLING_WINDOW_DURATION)

@@ -129,7 +129,7 @@ class SlideMatcher:
         anticipation_mode: str = "equilibrado",
         recent_transcript: str = "",
     ) -> SlideMatchResult:
-        """Avalia slides priorizando a vizinhança local antes de recorrer à busca global."""
+        """Avalia todos os slides comparando a hipótese local e global sem bloqueios prematuros."""
         normalized_transcript = normalize_text(transcript)
         normalized_recent = normalize_text(recent_transcript) if recent_transcript else ""
         if not normalized_transcript and not normalized_recent:
@@ -141,42 +141,6 @@ class SlideMatcher:
 
         recent_words = set(normalized_recent.split()) if normalized_recent else set()
 
-        # 1. BUSCA LOCAL PRIORITÁRIA (slides vizinhos ao slide atual)
-        if current_slide_index is not None and len(song.slides) > 1:
-            local_indices = {
-                current_slide_index - 1,
-                current_slide_index,
-                current_slide_index + 1,
-                current_slide_index + 2,
-            }
-            local_slides = [s for s in song.slides if s.index in local_indices]
-            local_candidates: list[SlideCandidate] = [
-                self._score_slide(
-                    slide=s,
-                    search_text=search_text,
-                    normalized_recent=normalized_recent,
-                    recent_words=recent_words,
-                    current_slide_index=current_slide_index,
-                    anticipation_mode=anticipation_mode,
-                )
-                for s in local_slides
-            ]
-
-            local_candidates.sort(
-                key=lambda c: (c.score, c.context_bonus),
-                reverse=True,
-            )
-
-            if local_candidates and local_candidates[0].score >= 75.0:
-                best_local = local_candidates[0]
-                return SlideMatchResult(
-                    best_candidate=best_local,
-                    candidates=local_candidates,
-                    is_anticipation=best_local.context_bonus > 0,
-                    is_local_match=True,
-                )
-
-        # 2. BUSCA GLOBAL (quando nenhum vizinho local alcança confiança)
         all_candidates: list[SlideCandidate] = [
             self._score_slide(
                 slide=s,
@@ -197,10 +161,41 @@ class SlideMatcher:
         if not all_candidates:
             return SlideMatchResult(best_candidate=None, candidates=[])
 
-        best = all_candidates[0]
+        if current_slide_index is not None and len(song.slides) > 1:
+            local_indices = {
+                current_slide_index - 1,
+                current_slide_index,
+                current_slide_index + 1,
+                current_slide_index + 2,
+            }
+            local_candidates = [c for c in all_candidates if c.slide_index in local_indices]
+            global_candidates = [c for c in all_candidates if c.slide_index not in local_indices]
+
+            best_local = local_candidates[0] if local_candidates else None
+            best_global = global_candidates[0] if global_candidates else None
+
+            # Regra de decisão balanceada local vs global:
+            # Um slide global (ex: retorno ao refrão com 95%) só vence o vizinho local se tiver evidência esmagadora (+10%)
+            if best_global and (
+                not best_local
+                or best_local.score < 72.0
+                or (best_global.score >= 90.0 and best_global.score >= best_local.score + 10.0)
+            ):
+                chosen = best_global
+                is_local = False
+            elif best_local:
+                chosen = best_local
+                is_local = True
+            else:
+                chosen = all_candidates[0]
+                is_local = False
+        else:
+            chosen = all_candidates[0]
+            is_local = True
+
         return SlideMatchResult(
-            best_candidate=best,
+            best_candidate=chosen,
             candidates=all_candidates,
-            is_anticipation=best.context_bonus > 0,
-            is_local_match=False,
+            is_anticipation=chosen.context_bonus > 0,
+            is_local_match=is_local,
         )

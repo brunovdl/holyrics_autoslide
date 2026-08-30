@@ -152,3 +152,30 @@ def test_logging_credential_sanitization_spec_AC_037():
     assert "secret_holyrics_token_12345" not in sanitized_bearer
     assert "Bearer ***" in sanitized_bearer
 
+
+def test_build_context_prompt_states(automation_setup):
+    """Valida que a construção de prompt contextual funciona em todos os estados sem erros de escopo."""
+    from app.models.song import Song
+    from app.models.slide import SongSlide
+    from app.decision.song_state_machine import SongState
+
+    svc, state, _, _ = automation_setup
+    song = Song(
+        id="1",
+        title="Escape",
+        artist="",
+        slides=[SongSlide(index=0, text="Aquele que acalma", start_words="Aquele que acalma")],
+    )
+
+    # Estado SONG_LOCKED
+    svc.song_decision_engine.set_active_song(song)
+    state.current_song = song
+    prompt = svc._build_context_prompt()
+    assert prompt is not None
+    assert "Escape" in prompt
+
+    # Estado SONG_TRANSITION_CANDIDATE
+    svc.song_decision_engine.state_machine.state = SongState.SONG_TRANSITION_CANDIDATE
+    prompt_trans = svc._build_context_prompt()
+    assert prompt_trans is None or isinstance(prompt_trans, str)
+

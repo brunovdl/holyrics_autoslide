@@ -62,23 +62,25 @@ class SongMatcher:
             token_set = fuzz.token_set_ratio(normalized_transcript, song.normalized_full_text)
             base_score = (p_ratio * 0.55) + (token_set * 0.45)
 
-            # Calcula bônus discriminativo para palavras raras e exclusivas desta música
+            # Calcula bônus discriminativo positivo para palavras raras e exclusivas desta música
             song_words = set(w for w in song.normalized_full_text.split() if len(w) > 2)
             matched_words = transcript_words.intersection(song_words)
 
-            discrim_score = 0.0
+            rare_bonus = 0.0
             if matched_words:
                 weights = []
                 for w in matched_words:
                     freq = doc_freq.get(w, num_songs)
-                    # Palavra exclusiva da música na playlist ganha peso máximo (1.0)
-                    # Palavra que se repete em todas as músicas ganha peso baixo (~0.2)
-                    weight = 1.0 / freq if freq > 0 else 0.2
-                    weights.append(weight)
-                discrim_score = min(100.0, (sum(weights) / max(1, len(matched_words))) * 100.0)
+                    # Palavra exclusiva da música na playlist (freq == 1) recebe bônus máximo
+                    if freq == 1:
+                        weights.append(1.0)
+                    elif freq == 2:
+                        weights.append(0.5)
+                if weights:
+                    rare_bonus = min(12.0, (sum(weights) / max(1, len(matched_words))) * 12.0)
 
-            # Combina score textual com a presença de termos exclusivos
-            final_song_score = (base_score * 0.70) + (discrim_score * 0.30) if discrim_score > 0 else base_score
+            # Bônus positivo aditivo: valoriza termos raros exclusivos sem nunca derrubar o score textual base
+            final_song_score = min(100.0, base_score + rare_bonus)
             scored_songs.append((song, final_song_score))
 
         scored_songs.sort(key=lambda x: x[1], reverse=True)

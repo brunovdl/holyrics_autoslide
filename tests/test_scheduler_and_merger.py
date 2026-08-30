@@ -48,3 +48,23 @@ def test_transcript_merger_overlap_deduplication():
     # Limpeza atômica
     merger.clear()
     assert merger.get_slide_window_text(4.0) == ""
+
+
+def test_chunk_scheduler_backlog_drop_latest_wins():
+    """Valida que backlog acumulado de 2 hops e 5 hops é descartado em prol do áudio mais recente."""
+    ring = AudioRingBuffer(max_seconds=15.0, sample_rate=16000)
+    scheduler = ChunkScheduler(ring, window_duration=2.5, hop_duration=0.8, sample_rate=16000)
+
+    # Escreve 4.0s de áudio (5 hops acumulados de uma vez)
+    samples_5_hops = int(4.0 * 16000)
+    ring.write(np.ones(samples_5_hops, dtype=np.float32))
+
+    assert scheduler.has_new_chunk()
+    chunk = scheduler.get_chunk_for_inference()
+    assert chunk is not None
+    # Como acumulou 5 hops e processou 1, descartou 4 hops
+    assert scheduler.dropped_chunks == 4
+
+    # Após entregar o áudio do presente, o cursor aponta para o presente e não há chunk imediato sem novas amostras
+    assert not scheduler.has_new_chunk()
+    assert scheduler.get_chunk_for_inference() is None

@@ -17,10 +17,12 @@ class LoopbackAudioSource(AudioSource):
         self,
         device_id: int | str | None = None,
         target_sample_rate: int = 16000,
+        channel_selection: str = "mono",
         on_levels_update: Callable[[float, float], None] | None = None,
     ) -> None:
         self.device_id = device_id
         self.target_sample_rate = target_sample_rate
+        self.channel_selection = channel_selection
         self.on_levels_update = on_levels_update
         self._source: DeviceAudioSource | None = None
 
@@ -35,6 +37,7 @@ class LoopbackAudioSource(AudioSource):
         self._source = DeviceAudioSource(
             device_id=resolved_id,
             target_sample_rate=self.target_sample_rate,
+            channel_selection=self.channel_selection,
             on_levels_update=self.on_levels_update,
         )
         self._source.start(callback)

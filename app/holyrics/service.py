@@ -23,13 +23,21 @@ class HolyricsService:
         self._running = False
         self._cached_songs: dict[str, Song] = {}
         self.on_manual_slide_change: Callable[[int], None] | None = None
+        self.on_song_change: Callable[[Song, bool], None] | None = None
         self._last_command_time = 0.0
         self._last_command_slide: int | None = None
+        self._last_song_cmd_time = 0.0
+        self._last_song_cmd_id: str | None = None
 
     def mark_command_sent(self, slide_index: int) -> None:
-        """Registra que um comando de troca foi enviado pela automação."""
+        """Registra que um comando de troca de slide foi enviado pela automação."""
         self._last_command_time = time.time()
         self._last_command_slide = slide_index
+
+    def mark_song_command_sent(self, song_id: str) -> None:
+        """Registra que um comando de troca de música foi enviado pela automação."""
+        self._last_song_cmd_time = time.time()
+        self._last_song_cmd_id = song_id
 
     async def fetch_playlist(self) -> PlaylistSnapshot:
         """Carrega todas as músicas da playlist do Holyrics com seus respectivos slides."""
@@ -112,18 +120,31 @@ class HolyricsService:
             if not matched_song and curr.title:
                 matched_song = self.state.playlist.get_song_by_title(curr.title)
 
-            if matched_song:
-                self.state.current_song = matched_song
-            elif curr.id or curr.title:
-                self.state.current_song = Song(
+            new_song = matched_song or (
+                Song(
                     id=str(curr.id) if curr.id else "",
                     title=curr.title or "Apresentação Atual",
                     artist=curr.artist or "",
                     slides=[],
                 )
-            elif not self.state.current_song and len(self.state.playlist.songs) == 1:
-                # Se há apenas 1 música na playlist e o Holyrics está ativo
-                self.state.current_song = self.state.playlist.songs[0]
+                if (curr.id or curr.title)
+                else None
+            )
+
+            if not new_song and not self.state.current_song and len(self.state.playlist.songs) == 1:
+                new_song = self.state.playlist.songs[0]
+
+            if new_song:
+                old_song = self.state.current_song
+                if not old_song or old_song.id != new_song.id or old_song.title != new_song.title:
+                    now = time.time()
+                    is_app_sent_song = (
+                        now - self._last_song_cmd_time < 2.5
+                        and self._last_song_cmd_id == new_song.id
+                    )
+                    self.state.current_song = new_song
+                    if self.on_song_change:
+                        self.on_song_change(new_song, not is_app_sent_song)
 
             if not curr.is_active and not self.state.current_song:
                 self.state.holyrics_status = "OCIOSO"

@@ -21,8 +21,10 @@ from app.transcription.scheduler import ChunkScheduler
 from app.transcription.merger import TranscriptMerger
 from app.transcription.vad import EnergyVAD
 from app.matching.matcher import LyricsMatcher
+from app.matching.lyric_tracker import LyricTracker
 from app.decision.slide_decision import SlideDecisionEngine
 from app.decision.song_decision import SongTransitionDecisionEngine
+from app.decision.song_state_machine import SongState
 from app.holyrics.service import HolyricsService
 from app.models.app_state import AppState
 from app.models.song import Song
@@ -76,6 +78,7 @@ class AutomationService:
             song_margin=settings.decision.song_margin,
             anticipation_mode=settings.decision.anticipation_mode,
         )
+        self.lyric_tracker = LyricTracker()
 
         self.decision_engine = SlideDecisionEngine(
             threshold_strong=settings.decision.slide_threshold_strong,
@@ -98,6 +101,7 @@ class AutomationService:
         self._manual_pause_until = 0.0
 
         self.holyrics_service.on_manual_slide_change = self._handle_manual_slide_change
+        self.holyrics_service.on_song_change = self._handle_holyrics_song_change
 
     def reset_context_for_song_change(self) -> None:
         """Limpa completamente todo o histórico de transcrição e decisão ao trocar de música."""
@@ -105,11 +109,20 @@ class AutomationService:
         self.rolling_transcript.clear()
         self.decision_engine.reset_candidate()
         self.state.candidate_slide_index = None
-        self.state.candidate_slide_score = 0.0
+        self.state.candidate_score = 0.0
         self.state.candidate_slide_text = ""
         self.state.candidate_hits = 0
         self.state.last_transcript_chunk = ""
         self.state.rolling_transcript = ""
+
+    def _handle_holyrics_song_change(self, new_song: Song, is_manual: bool) -> None:
+        """Sincroniza a autoridade da música vinda do Holyrics com a SongStateMachine."""
+        if is_manual:
+            log_event("HOLYRICS", f"Música sincronizada do Holyrics: '{new_song.title}'.")
+            self.reset_context_for_song_change()
+            self.song_decision_engine.set_active_song(new_song)
+            self.state.current_song = new_song
+            self.state.notify()
 
     def _handle_manual_slide_change(self, new_slide_index: int) -> None:
         """Chamado quando o operador altera o slide manualmente no Holyrics."""
@@ -159,11 +172,13 @@ class AutomationService:
         elif source_type == "loopback":
             self._audio_source = LoopbackAudioSource(
                 device_id=self.settings.audio.device_id,
+                channel_selection=self.settings.audio.channel_selection,
                 on_levels_update=_levels_cb,
             )
         else:
             self._audio_source = DeviceAudioSource(
                 device_id=self.settings.audio.device_id,
+                channel_selection=self.settings.audio.channel_selection,
                 on_levels_update=_levels_cb,
             )
 
@@ -188,9 +203,14 @@ class AutomationService:
         self.state.notify()
 
     def _build_context_prompt(self) -> str | None:
-        """Gera um prompt dinâmico focado nas estrofes ao redor do slide atual."""
+        """Gera um prompt dinâmico adaptado ao estado: estrofes locais durante SONG_LOCKED ou neutro durante transições."""
         items: list[str] = []
-        if self.state.current_song:
+        is_firmly_locked = (
+            self.song_decision_engine.state_machine.state == SongState.SONG_LOCKED
+            and self.state.current_song is not None
+        )
+
+        if is_firmly_locked and self.state.current_song:
             items.append(self.state.current_song.title)
             slides = self.state.current_song.slides
             curr_idx = self.state.current_slide_index or 0
@@ -200,7 +220,8 @@ class AutomationService:
                 if slide.start_words:
                     items.append(slide.start_words)
         elif self.state.playlist.songs:
-            for s in self.state.playlist.songs[:3]:
+            # Durante transição ou busca inicial: lista apenas títulos da playlist sem enviesar com estrofes antigas
+            for s in self.state.playlist.songs[:4]:
                 items.append(s.title)
 
         if items:
@@ -300,14 +321,24 @@ class AutomationService:
                         self.state.notify()
 
                         if self.state.automation_mode == "AUTOMATICO" and not self.state.manual_override_active:
+                            self.holyrics_service.mark_song_command_sent(song_decision.target_song.id)
                             try:
                                 self.holyrics_service.client.show_lyrics_sync(song_decision.target_song.id, initial_index=0)
                             except Exception as e:
                                 log_event("HOLYRICS", f"Erro ao enviar ShowLyrics: {e}", level=30)
                         return
 
-        # Avaliação de slides dentro da música travada
+        # Avaliação de slides dentro da música travada via LyricTracker e SlideMatcher
         if self.state.current_song and self.state.current_song.slides:
+            if self.lyric_tracker.song != self.state.current_song:
+                self.lyric_tracker.set_song(self.state.current_song)
+
+            tracker_hyp = self.lyric_tracker.evaluate_evidence(
+                transcript_window=slide_transcript,
+                current_slide_index=self.state.current_slide_index,
+                anticipation_mode=self.settings.decision.anticipation_mode,
+            )
+
             slide_res = self.matcher.match_slide(
                 transcript=slide_transcript,
                 song=self.state.current_song,
@@ -316,14 +347,27 @@ class AutomationService:
             )
 
             best_cand = slide_res.best_candidate
-            if best_cand:
-                self.state.candidate_slide_index = best_cand.slide_index
-                self.state.candidate_slide_text = best_cand.text
-                self.state.candidate_score = best_cand.score
+            cand_idx = None
+            cand_score = 0.0
+            cand_text = ""
+
+            if tracker_hyp and (not best_cand or tracker_hyp.final_score >= best_cand.score):
+                cand_idx = tracker_hyp.slide_index
+                cand_score = tracker_hyp.final_score
+                cand_text = self.state.current_song.slides[cand_idx].text if cand_idx < len(self.state.current_song.slides) else ""
+            elif best_cand:
+                cand_idx = best_cand.slide_index
+                cand_score = best_cand.score
+                cand_text = best_cand.text
+
+            if cand_idx is not None:
+                self.state.candidate_slide_index = cand_idx
+                self.state.candidate_slide_text = cand_text
+                self.state.candidate_score = cand_score
 
                 dec_res = self.decision_engine.evaluate(
-                    candidate_index=best_cand.slide_index,
-                    candidate_score=best_cand.score,
+                    candidate_index=cand_idx,
+                    candidate_score=cand_score,
                     current_slide_index=self.state.current_slide_index,
                 )
 
