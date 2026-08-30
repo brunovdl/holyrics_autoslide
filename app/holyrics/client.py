@@ -29,6 +29,7 @@ class HolyricsClient:
         self.timeout = timeout
         self._client = client
         self._owns_client = client is None
+        self._sync_client: httpx.Client | None = None
 
     @property
     def base_url(self) -> str:
@@ -38,6 +39,21 @@ class HolyricsClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
+
+    def _get_sync_client(self) -> httpx.Client:
+        """Retorna uma sessão HTTP síncrona persistente com keep-alive."""
+        if self._sync_client is None or self._sync_client.is_closed:
+            self._sync_client = httpx.Client(timeout=self.timeout)
+        return self._sync_client
+
+    def close_sync(self) -> None:
+        """Encerra a sessão HTTP síncrona."""
+        if self._sync_client and not self._sync_client.is_closed:
+            try:
+                self._sync_client.close()
+            except Exception:
+                pass
+            self._sync_client = None
 
     async def reset_client(self) -> None:
         """Fecha e reinicia a sessão HTTP para evitar sockets pendentes."""
@@ -219,19 +235,23 @@ class HolyricsClient:
         return True
 
     def post_sync(self, action: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Executa requisição POST síncrona segura para chamadas a partir de threads."""
+        """Executa requisição POST síncrona segura para chamadas a partir de threads com conexão persistente."""
         url = f"{self.base_url}/{action}?token={self.token}"
         headers = {"Content-Type": "application/json"}
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, json=data or {}, headers=headers)
-                response.raise_for_status()
-                if response.content:
-                    try:
-                        return response.json()
-                    except Exception:
-                        return {"status": "ok", "raw": response.text}
-                return {"status": "ok"}
+            client = self._get_sync_client()
+            response = client.post(url, json=data or {}, headers=headers)
+            response.raise_for_status()
+            if response.content:
+                try:
+                    return response.json()
+                except Exception:
+                    return {"status": "ok", "raw": response.text}
+            return {"status": "ok"}
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException, ConnectionRefusedError, OSError) as e:
+            self.close_sync()
+            log_event("HOLYRICS", f"Falha de conexão síncrona na requisição {action} (sessão reiniciada): {e}", level=30)
+            raise
         except httpx.HTTPError as e:
             log_event("HOLYRICS", f"Erro síncrono na requisição {action}: {e}", level=30)
             raise
@@ -242,8 +262,6 @@ class HolyricsClient:
             payload["initial_index"] = int(initial_index)
             payload["index"] = int(initial_index)
         self.post_sync("ShowLyrics", payload)
-        if initial_index is not None:
-            self.go_to_index_sync(initial_index)
         return True
 
     def go_to_index_sync(self, index: int) -> bool:

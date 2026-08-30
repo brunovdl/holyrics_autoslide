@@ -22,11 +22,12 @@ def test_early_phrase_start_detection():
     tracker = LyricTracker(song)
 
     # Cantor está no slide 0 e começa a cantar as 2 primeiras palavras do slide 1: 'Santo e poderoso'
-    hyp = tracker.evaluate_evidence("santo e poderoso", current_slide_index=0)
-    assert hyp is not None
-    assert hyp.slide_index == 1
-    assert hyp.is_early_start
-    assert hyp.final_score >= 90.0
+    res = tracker.evaluate_evidence("santo e poderoso", current_slide_index=0)
+    assert res.best_hypothesis is not None
+    assert res.best_hypothesis.slide_index == 1
+    assert res.best_hypothesis.is_early_start
+    assert res.best_hypothesis.final_score >= 90.0
+    assert res.margin >= 0.0
 
 
 def test_natural_transition_prior():
@@ -35,10 +36,10 @@ def test_natural_transition_prior():
     tracker = LyricTracker(song)
 
     # Texto com correspondência moderada com slide 1
-    hyp = tracker.evaluate_evidence("o Teu nome e poder", current_slide_index=0)
-    assert hyp is not None
-    assert hyp.slide_index == 1
-    assert hyp.transition_prior > 0
+    res = tracker.evaluate_evidence("o Teu nome e poder", current_slide_index=0)
+    assert res.best_hypothesis is not None
+    assert res.best_hypothesis.slide_index == 1
+    assert res.best_hypothesis.transition_prior > 0
 
 
 def test_repeated_chorus_disambiguation_by_graph():
@@ -48,6 +49,19 @@ def test_repeated_chorus_disambiguation_by_graph():
 
     # Se estamos no slide 4 ("Teu reino...") e o cantor canta o refrão ("Aleluia ao Deus...")
     # O rastreador deve selecionar a ocorrência 5 (imediatamente seguinte), não a ocorrência 2 (lá atrás).
-    hyp = tracker.evaluate_evidence("Aleluia ao Deus da minha salvacao", current_slide_index=4)
-    assert hyp is not None
-    assert hyp.slide_index == 5
+    res = tracker.evaluate_evidence("Aleluia ao Deus da minha salvacao", current_slide_index=4)
+    assert res.best_hypothesis is not None
+    assert res.best_hypothesis.slide_index == 5
+
+
+def test_fast_path_next_slide():
+    """Valida que o Fast Path N->N+1 dispara com base no chunk instantâneo."""
+    song = _create_sample_song()
+    tracker = LyricTracker(song)
+
+    # Chunk instantâneo do ASR contendo o início do slide 1
+    fast_hyp = tracker.evaluate_fast_path("santo e poderoso", current_slide_index=0)
+    assert fast_hyp is not None
+    assert fast_hyp.slide_index == 1
+    assert fast_hyp.final_score >= 95.0
+    assert fast_hyp.is_early_start

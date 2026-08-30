@@ -104,3 +104,22 @@ def test_calculate_audio_levels_spec_AC_012():
     assert rms_db > -60.0
     assert peak_db > -60.0
     assert peak_db >= rms_db
+
+
+def test_voice_bandpass_filter_attenuation():
+    """Valida atenuação de frequências fora da banda vocal 300Hz-3400Hz."""
+    from app.audio.resampler import apply_voice_bandpass_filter
+    sr = 16000
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+
+    # Tom de 60 Hz (grave / ruído elétrico) vs Tom de 1000 Hz (frequência central vocal)
+    low_freq_tone = (0.8 * np.sin(2 * np.pi * 60 * t)).astype(np.float32)
+    vocal_tone = (0.8 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
+
+    filtered_low = apply_voice_bandpass_filter(low_freq_tone, sample_rate=sr)
+    filtered_vocal = apply_voice_bandpass_filter(vocal_tone, sample_rate=sr)
+
+    low_energy = np.mean(filtered_low ** 2)
+    vocal_energy = np.mean(filtered_vocal ** 2)
+
+    assert low_energy < vocal_energy * 0.1

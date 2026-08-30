@@ -36,6 +36,15 @@ class LyricTrackHypothesis:
     reason: str
 
 
+@dataclass
+class LyricTrackResult:
+    """Resultado consolidado de rastreamento com melhor hipótese e margem de confiança."""
+    best_hypothesis: Optional[LyricTrackHypothesis]
+    second_score: float = 0.0
+    margin: float = 0.0
+    is_fast_path: bool = False
+
+
 class LyricTracker:
     """Rastreador de letra baseado no universo fechado de slides e grafo de transições."""
 
@@ -81,16 +90,52 @@ class LyricTracker:
                     if idx < len(self.signatures):
                         self.signatures[idx].is_chorus_candidate = True
 
+    def evaluate_fast_path(
+        self,
+        recent_chunk: str,
+        current_slide_index: Optional[int],
+    ) -> Optional[LyricTrackHypothesis]:
+        """FAST PATH: Avalia apenas a transição natural N -> N+1 no áudio instantâneo do último chunk."""
+        if current_slide_index is None or not self.signatures:
+            return None
+
+        next_idx = current_slide_index + 1
+        if next_idx >= len(self.signatures):
+            return None
+
+        norm_chunk = normalize_text(recent_chunk)
+        if not norm_chunk:
+            return None
+
+        sig = self.signatures[next_idx]
+
+        # Verifica se o início do próximo slide está presente no chunk instantâneo
+        has_start_3 = len(sig.start_3_words) > 3 and sig.start_3_words in norm_chunk
+        has_start_2 = len(sig.start_2_words) > 4 and sig.start_2_words in norm_chunk
+
+        if has_start_3 or has_start_2:
+            return LyricTrackHypothesis(
+                slide_index=next_idx,
+                emission_score=95.0,
+                transition_prior=15.0,
+                start_word_bonus=15.0,
+                raw_score=125.0,
+                final_score=98.0,
+                is_early_start=True,
+                reason="fast_path_proximo_slide",
+            )
+        return None
+
     def evaluate_evidence(
         self,
         transcript_window: str,
         current_slide_index: Optional[int] = None,
         anticipation_mode: str = "equilibrado",
-    ) -> Optional[LyricTrackHypothesis]:
+    ) -> LyricTrackResult:
         """Avalia a evidência de áudio recente contra o grafo de transição dos slides."""
         norm_input = normalize_text(transcript_window)
         if not norm_input or not self.signatures:
-            return None
+            return LyricTrackResult(best_hypothesis=None)
 
         input_words = set(norm_input.split())
         curr_idx = current_slide_index if current_slide_index is not None else 0
@@ -140,7 +185,7 @@ class LyricTracker:
                     jump_penalty = min(20.0, dist * 3.0)
 
             # 4. Ajuste por modo de antecipação
-            if anticipation_mode == "rapido" and is_early_start and idx == curr_idx + 1:
+            if anticipation_mode in ("antecipado", "rapido") and is_early_start and idx == curr_idx + 1:
                 start_bonus += 5.0
 
             raw_score = emission + transition_prior + start_bonus - jump_penalty
@@ -169,4 +214,16 @@ class LyricTracker:
 
         # Ordena pelo raw_score para que priors e bônus desfaçam empates de 100%
         hypotheses.sort(key=lambda h: (h.raw_score, -abs(h.slide_index - curr_idx)), reverse=True)
-        return hypotheses[0] if hypotheses else None
+        if not hypotheses:
+            return LyricTrackResult(best_hypothesis=None)
+
+        best = hypotheses[0]
+        second_score = hypotheses[1].final_score if len(hypotheses) > 1 else 0.0
+        margin = max(0.0, round(best.final_score - second_score, 1))
+
+        return LyricTrackResult(
+            best_hypothesis=best,
+            second_score=second_score,
+            margin=margin,
+            is_fast_path=False,
+        )

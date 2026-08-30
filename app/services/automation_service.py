@@ -149,16 +149,9 @@ class AutomationService:
         if self.state.audio_capturing:
             return
 
-        last_vu_time = 0.0
-
         def _levels_cb(rms_db: float, peak_db: float) -> None:
-            nonlocal last_vu_time
-            now = time.time()
             self.state.audio_rms_db = rms_db
             self.state.audio_peak_db = peak_db
-            if now - last_vu_time >= 0.12:
-                last_vu_time = now
-                self.state.notify()
 
         def _audio_chunk_cb(chunk: np.ndarray) -> None:
             self.audio_ring_buffer.write(chunk)
@@ -278,7 +271,6 @@ class AutomationService:
                                     self.state.inference_time_ms = asr_res.inference_time
                                     if asr_res.duration > 0:
                                         self.state.rtf = round((asr_res.inference_time / 1000.0) / asr_res.duration, 2)
-                                    self.state.notify()
 
                                     log_event("ASR", f"Transcrição: \"{asr_res.text}\" ({asr_res.inference_time:.0f}ms)")
                                     self._process_matching_and_decision(
@@ -286,6 +278,8 @@ class AutomationService:
                                         song_transcript=song_text,
                                         recent_transcript=asr_res.text,
                                     )
+                                    # Notifica UI apenas APÓS o comando de decisão ser disparado
+                                    self.state.notify()
                             except Exception as e:
                                 log_event("ASR", f"Erro no processamento do chunk: {e}", level=30)
 
@@ -328,39 +322,30 @@ class AutomationService:
                                 log_event("HOLYRICS", f"Erro ao enviar ShowLyrics: {e}", level=30)
                         return
 
-        # Avaliação de slides dentro da música travada via LyricTracker e SlideMatcher
+        # Avaliação de slides dentro da música travada via LyricTracker (Fast Path e Grafo)
         if self.state.current_song and self.state.current_song.slides:
             if self.lyric_tracker.song != self.state.current_song:
                 self.lyric_tracker.set_song(self.state.current_song)
 
-            tracker_hyp = self.lyric_tracker.evaluate_evidence(
+            # 1. FAST PATH: Transição imediata N -> N+1 pelo início de frase no chunk mais recente
+            fast_hyp = self.lyric_tracker.evaluate_fast_path(
+                recent_chunk=recent_transcript,
+                current_slide_index=self.state.current_slide_index,
+            )
+
+            # 2. RECOVERY / FULL EVIDENCE: Grafo probabilístico e janela acumulada
+            track_res = self.lyric_tracker.evaluate_evidence(
                 transcript_window=slide_transcript,
                 current_slide_index=self.state.current_slide_index,
                 anticipation_mode=self.settings.decision.anticipation_mode,
             )
 
-            slide_res = self.matcher.match_slide(
-                transcript=slide_transcript,
-                song=self.state.current_song,
-                current_slide_index=self.state.current_slide_index,
-                recent_transcript=recent_transcript,
-            )
-
-            best_cand = slide_res.best_candidate
-            cand_idx = None
-            cand_score = 0.0
-            cand_text = ""
-
-            if tracker_hyp and (not best_cand or tracker_hyp.final_score >= best_cand.score):
-                cand_idx = tracker_hyp.slide_index
-                cand_score = tracker_hyp.final_score
+            chosen_hyp = fast_hyp or track_res.best_hypothesis
+            if chosen_hyp:
+                cand_idx = chosen_hyp.slide_index
+                cand_score = chosen_hyp.final_score
                 cand_text = self.state.current_song.slides[cand_idx].text if cand_idx < len(self.state.current_song.slides) else ""
-            elif best_cand:
-                cand_idx = best_cand.slide_index
-                cand_score = best_cand.score
-                cand_text = best_cand.text
 
-            if cand_idx is not None:
                 self.state.candidate_slide_index = cand_idx
                 self.state.candidate_slide_text = cand_text
                 self.state.candidate_score = cand_score
@@ -373,7 +358,6 @@ class AutomationService:
 
                 self.state.candidate_hits = dec_res.consecutive_hits
                 self.state.required_hits = dec_res.required_hits
-                self.state.notify()
 
                 if dec_res.should_switch and dec_res.target_slide_index is not None:
                     if self.state.automation_mode == "AUTOMATICO" and not self.state.manual_override_active:

@@ -24,15 +24,16 @@ class HolyricsService:
         self._cached_songs: dict[str, Song] = {}
         self.on_manual_slide_change: Callable[[int], None] | None = None
         self.on_song_change: Callable[[Song, bool], None] | None = None
-        self._last_command_time = 0.0
-        self._last_command_slide: int | None = None
+        self._pending_commands: dict[int, float] = {}
         self._last_song_cmd_time = 0.0
         self._last_song_cmd_id: str | None = None
 
     def mark_command_sent(self, slide_index: int) -> None:
         """Registra que um comando de troca de slide foi enviado pela automação."""
-        self._last_command_time = time.time()
-        self._last_command_slide = slide_index
+        now = time.time()
+        self._pending_commands[slide_index] = now
+        # Limpa comandos expirados (> 4.0s)
+        self._pending_commands = {k: v for k, v in self._pending_commands.items() if now - v < 4.0}
 
     def mark_song_command_sent(self, song_id: str) -> None:
         """Registra que um comando de troca de música foi enviado pela automação."""
@@ -173,11 +174,12 @@ class HolyricsService:
                 and slide_0_based != self.state.current_slide_index
             ):
                 now = time.time()
-                is_recent_app_command = (
-                    now - self._last_command_time < 2.0
-                    and self._last_command_slide == slide_0_based
-                )
-                if not is_recent_app_command:
+                cmd_sent_time = self._pending_commands.get(slide_0_based)
+                is_recent_app_command = cmd_sent_time is not None and (now - cmd_sent_time) < 3.5
+
+                if is_recent_app_command:
+                    self._pending_commands.pop(slide_0_based, None)
+                else:
                     log_event(
                         "HOLYRICS",
                         f"Intervenção manual detectada: Holyrics mudou para slide {slide_1_based}",

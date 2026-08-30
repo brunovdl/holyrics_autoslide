@@ -1,15 +1,15 @@
 # Holyrics AutoSlide 🎵⚡
 
-**Holyrics AutoSlide** é um sistema inteligente e autônomo para automação de slides no [Holyrics](https://holyrics.com.br/), utilizando **transcrição de áudio em tempo real por IA (Groq Cloud Whisper API)**, **isolamento vocal acústico** e um **motor de decisão heurístico** com latência ultra-baixa (< 400ms).
+**Holyrics AutoSlide** é um sistema inteligente e autônomo para automação de slides no [Holyrics](https://holyrics.com.br/), utilizando **transcrição de áudio em tempo real por IA (Groq Cloud Whisper API)**, **pré-processamento espectral com filtro passa-faixa vocal** e um **motor de decisão por rastreamento de letra (LyricTracker)** com latência ultra-baixa (< 400ms).
 
-O software escuta o áudio capturado (microfone ou loopback do sistema/YouTube), filtra o som da voz, transcreve em tempo real, identifica a música e a estrofe cantada e envia comandos HTTP para a API oficial do Holyrics avançando ou saltando slides e músicas automaticamente.
+O software escuta o áudio capturado (microfone, interface multicanal ou loopback do sistema), filtra a banda vocal (300Hz–3400Hz), normaliza o ganho, transcreve em tempo real e rastreia o avanço da letra através de um grafo probabilístico de transições, enviando comandos HTTP para a API oficial do Holyrics.
 
 ---
 
 ## ✨ Principais Recursos
 
-- 🎙️ **Isolamento Vocal por Filtro Passa-Faixa (300Hz - 3400Hz)**:
-  - Atenua bumbos, contrabaixos pesados e pratos estridentes da bateria, garantindo que o Whisper receba apenas a voz limpa do cantor.
+- 🎙️ **Pré-processamento com Filtro de Banda Vocal (300Hz - 3400Hz) & Normalização**:
+  - Atenua frequências fora da região vocal (bumbos subsônicos e agudos estridentes de pratos), garantindo que o Whisper receba sinal focado e nivelado.
 - ⚡ **Latência Ultra-Baixa (< 400ms)**:
   - Processamento em chunks de 0.8s com o modelo `whisper-large-v3-turbo` na nuvem da Groq (resposta de inferência em ~120-180ms).
 - 🧠 **Motor de Decisão & Troca Inteligente de Slides**:

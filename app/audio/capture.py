@@ -12,7 +12,13 @@ except Exception:
     sd = None
 
 from app.audio.base import AudioSource
-from app.audio.resampler import calculate_audio_levels, convert_to_mono, resample_audio
+from app.audio.resampler import (
+    calculate_audio_levels,
+    convert_to_mono,
+    resample_audio,
+    apply_voice_bandpass_filter,
+    normalize_audio,
+)
 from app.utils.logging import log_event
 
 
@@ -65,17 +71,23 @@ class DeviceAudioSource(AudioSource):
             if audio_mono.dtype != np.float32:
                 audio_mono = audio_mono.astype(np.float32)
 
+            # 1. Níveis de VU no sinal de entrada original
             rms_db, peak_db = calculate_audio_levels(audio_mono)
             if self.on_levels_update:
                 self.on_levels_update(rms_db, peak_db)
 
+            # 2. Reamostragem para 16kHz
             if native_sr != self.target_sample_rate:
                 audio_16k = resample_audio(audio_mono, native_sr, self.target_sample_rate)
             else:
                 audio_16k = audio_mono
 
+            # 3. Filtro passa-faixa vocal (300Hz–3400Hz) e normalização de ganho
+            filtered_audio = apply_voice_bandpass_filter(audio_16k, sample_rate=self.target_sample_rate)
+            processed_audio = normalize_audio(filtered_audio)
+
             if self._callback and self._is_active:
-                self._callback(audio_16k)
+                self._callback(processed_audio)
 
     def start(self, callback: Callable[[np.ndarray], None]) -> None:
         if sd is None:
