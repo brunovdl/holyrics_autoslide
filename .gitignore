@@ -1,0 +1,45 @@
+# Ambientes Virtuais Python
+.venv/
+venv/
+ENV/
+env/
+.env.vault
+
+# Arquivos de Variáveis de Ambiente & Chaves Secretas
+.env
+.env.local
+.env.*.local
+*.env
+
+# Configurações Locais de Usuário
+.holyrics_autoslide_settings.json
+settings.json
+
+# Byte-compiled / Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs e Arquivos Temporários de Execução
+*.log
+*.wav
+scratch/
+.system_generated/
+
+# Editores e IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Ferramentas Internas e Metadados de Desenvolvimento
+.agents/
+.onp-spec/
+.spec/
+onpspec.config.json
+prompt_antigravity_holyrics_autoslide.md
